@@ -3,17 +3,31 @@ IgnisAI - Dashboard Centralizado de Monitoreo
 Cubre: HU02 (video en vivo), HU03 (recuadros), HU06 (disparo de alerta),
 HU07/HU09 (dashboard con últimas 10 detecciones), HU08 (clasificación
 de veracidad), HU08/HU09 (métricas de confianza).
+
+Captura de cámara vía WebRTC (streamlit-webrtc): permite usar la cámara
+del celular, laptop o PC directamente desde el navegador, sin necesidad
+de cámara física en el servidor.
 """
 import os
+import threading
 import time
 
+import av
 import cv2
 import streamlit as st
+from streamlit_webrtc import VideoProcessorBase, RTCConfiguration, webrtc_streamer
 
 import config
 import database as db
-from detector import FireDetector
 from alerting import AlertManager
+from detector import FireDetector
+
+# STUN público de Google — permite la negociación WebRTC en la mayoría de redes.
+# Si la red del usuario está detrás de un NAT simétrico estricto puede que
+# requiera un servidor TURN adicional.
+_RTC_CONFIG = RTCConfiguration({
+    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+})
 
 
 @st.cache_resource
@@ -21,14 +35,42 @@ def get_detector():
     return FireDetector()
 
 
-@st.cache_resource
-def get_alert_manager():
-    return AlertManager()
+class FireVideoProcessor(VideoProcessorBase):
+    """
+    Procesador de video WebRTC: recibe cada fotograma del navegador del
+    cliente, ejecuta inferencia y devuelve el frame anotado.
+    Corre en hilo propio — no puede llamar a st.* directamente.
+    """
+
+    def __init__(self):
+        self._detector = get_detector()
+        self._alert_mgr = AlertManager()
+        self._lock = threading.Lock()
+
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        img = frame.to_ndarray(format="bgr24")
+        detections = self._detector.predict(img)
+        img = self._detector.draw(img, detections)
+
+        with self._lock:
+            if self._alert_mgr.update(bool(detections)) and detections:
+                mejor = max(detections, key=lambda d: d.confianza)
+                ruta = AlertManager.guardar_fotograma(img)
+                enviado = AlertManager.enviar_correo(ruta, mejor.clase, mejor.confianza)
+                db.registrar_alerta(mejor.clase, mejor.confianza, ruta, enviado)
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 
 def _panel_alertas():
     """Panel lateral: últimas 10 detecciones, más recientes primero (HU07/HU09)."""
-    st.subheader("🚨 Últimas detecciones")
+    col_titulo, col_refresh = st.columns([3, 1])
+    with col_titulo:
+        st.subheader("🚨 Últimas detecciones")
+    with col_refresh:
+        if st.button("↻", help="Actualizar panel de alertas"):
+            st.rerun()
+
     alertas = db.ultimas_alertas(config.DASHBOARD_LAST_ALERTS)
     if not alertas:
         st.info("Sin detecciones registradas.")
@@ -44,7 +86,6 @@ def _panel_alertas():
                     f"Confianza: **{a['confianza']:.1f}%**"
                 )
             with c2:
-                # HU07/HU08: botones de acción rápida; desaparecen al clasificar
                 if a["estado"] == "Pendiente":
                     if st.button("✅ Confirmar", key=f"conf_{a['id']}",
                                  use_container_width=True):
@@ -66,8 +107,8 @@ def _procesar_frame(frame, detector, alert_mgr):
 
     if alert_mgr.update(bool(detections)):
         mejor = max(detections, key=lambda d: d.confianza)
-        ruta = alert_mgr.guardar_fotograma(frame)
-        enviado = alert_mgr.enviar_correo(ruta, mejor.clase, mejor.confianza)
+        ruta = AlertManager.guardar_fotograma(frame)
+        enviado = AlertManager.enviar_correo(ruta, mejor.clase, mejor.confianza)
         db.registrar_alerta(mejor.clase, mejor.confianza, ruta, enviado)
         st.toast(f"🚨 Alerta registrada: {mejor.clase.upper()} "
                  f"({mejor.confianza*100:.0f}%)")
@@ -77,14 +118,12 @@ def _procesar_frame(frame, detector, alert_mgr):
 def render():
     st.title("📹 Dashboard Centralizado de Monitoreo")
     detector = get_detector()
-    alert_mgr = get_alert_manager()
 
     if detector.simulated:
         st.warning("Motor en **modo simulación** (sin pesos YOLOv8 entrenados). "
                    "Cargue `models/best.pt` o súbalo desde Configuración para "
                    "activar la inferencia con CNN.")
 
-    # Bloque central (video) + panel lateral (historial) — HU07/HU09
     col_video, col_alertas = st.columns([3, 1.4])
 
     with col_alertas:
@@ -92,44 +131,41 @@ def render():
 
     with col_video:
         fuente = st.radio("Fuente de video",
-                          ["Cámara USB", "Archivo de video", "Imagen de prueba"],
+                          ["Cámara del dispositivo", "Archivo de video", "Imagen de prueba"],
                           horizontal=True)
 
-        if fuente == "Cámara USB":
-            iniciar = st.toggle("Iniciar monitoreo en vivo", value=False)
-            placeholder = st.empty()
-            fps_info = st.empty()
-            if iniciar:
-                cap = cv2.VideoCapture(config.CAMERA_INDEX)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.FRAME_WIDTH)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.FRAME_HEIGHT)
-                if not cap.isOpened():
-                    st.error("No se pudo abrir la cámara USB (índice "
-                             f"{config.CAMERA_INDEX}). Verifique la conexión.")
-                else:
-                    t_prev = time.time()
-                    while st.session_state.get("vista") == "dashboard":
-                        ok, frame = cap.read()
-                        if not ok:
-                            st.error("Se perdió el flujo de video.")
-                            break
-                        frame = cv2.resize(frame,
-                                           (config.FRAME_WIDTH, config.FRAME_HEIGHT))
-                        frame, _ = _procesar_frame(frame, detector, alert_mgr)
-                        # HU02: FPS estable >= 15
-                        t_now = time.time()
-                        fps = 1.0 / max(t_now - t_prev, 1e-6)
-                        t_prev = t_now
-                        placeholder.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
-                                          channels="RGB", use_container_width=True)
-                        fps_info.caption(f"FPS: {fps:.1f} · Resolución: "
-                                         f"{config.FRAME_WIDTH}x{config.FRAME_HEIGHT}")
-                    cap.release()
+        # ------------------------------------------------------------------ #
+        # HU02 — Cámara en vivo vía WebRTC                                   #
+        # Captura el video desde el navegador del cliente (celular, laptop,  #
+        # PC) y lo procesa en el servidor con YOLOv8 / modo simulación.      #
+        # ------------------------------------------------------------------ #
+        if fuente == "Cámara del dispositivo":
+            st.info(
+                "Permite el acceso a la cámara cuando el navegador lo solicite. "
+                "Funciona con la cámara del celular, laptop o una cámara USB "
+                "conectada al equipo desde el que accedes.",
+                icon="📷",
+            )
+            ctx = webrtc_streamer(
+                key="ignisai-fire-detection",
+                video_processor_factory=FireVideoProcessor,
+                rtc_configuration=_RTC_CONFIG,
+                media_stream_constraints={"video": True, "audio": False},
+                async_processing=True,
+            )
+            if ctx.state.playing:
+                st.success("Monitoreo activo — las alertas se registran automáticamente. "
+                           "Pulsa **↻** en el panel lateral para actualizar las detecciones.")
 
+        # ------------------------------------------------------------------ #
+        # Archivo de video                                                    #
+        # ------------------------------------------------------------------ #
         elif fuente == "Archivo de video":
+            alert_mgr = AlertManager()
             up = st.file_uploader("Suba un video (mp4/avi)", type=["mp4", "avi", "mov"])
             if up:
                 tmp = os.path.join(config.BASE_DIR, "assets", "tmp_video.mp4")
+                os.makedirs(os.path.dirname(tmp), exist_ok=True)
                 with open(tmp, "wb") as f:
                     f.write(up.read())
                 if st.button("▶ Procesar video"):
@@ -147,10 +183,13 @@ def render():
                     cap.release()
                     st.success("Procesamiento del video finalizado.")
 
-        else:  # Imagen de prueba (validación HU01: <= 15 s por imagen)
+        # ------------------------------------------------------------------ #
+        # Imagen de prueba (HU01: inferencia ≤ 15 s)                         #
+        # ------------------------------------------------------------------ #
+        else:
+            import numpy as np
             up = st.file_uploader("Suba una imagen (jpg/png)", type=["jpg", "jpeg", "png"])
             if up:
-                import numpy as np
                 data = np.frombuffer(up.read(), np.uint8)
                 frame = cv2.imdecode(data, cv2.IMREAD_COLOR)
                 t0 = time.time()
