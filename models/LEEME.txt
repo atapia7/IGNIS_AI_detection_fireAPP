@@ -1,0 +1,1 @@
+Coloque aqui los pesos entrenados best.pt de YOLOv8n

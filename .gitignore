@@ -1,0 +1,20 @@
+# Entorno virtual
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Clave secreta (NO subir)
+.secret.key
+
+# Base de datos local
+*.db
+
+# Logs
+logs/
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db

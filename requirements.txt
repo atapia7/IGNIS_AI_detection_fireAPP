@@ -1,0 +1,8 @@
+streamlit>=1.35
+opencv-python>=4.9
+pandas>=2.0
+plotly>=5.20
+numpy>=1.26
+cryptography>=42.0
+# Motor CNN (HU01). Instalar para inferencia real con YOLOv8:
+ultralytics>=8.2
