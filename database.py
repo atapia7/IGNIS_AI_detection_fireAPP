@@ -11,7 +11,6 @@ from datetime import datetime
 from contextlib import contextmanager
 
 import config
-import crypto_utils
 
 
 @contextmanager
@@ -79,7 +78,7 @@ def init_db():
         cur = conn.execute("SELECT COUNT(*) c FROM usuarios")
         if cur.fetchone()["c"] == 0:
             crear_usuario_conn(conn, "Administrador General",
-                               "admin@ignisai.pe", "admin123", "Administrador")
+                               "admin", "admin123", "Administrador")
 
         # Fila única de configuración SMTP (si aún no existe)
         conn.execute("INSERT OR IGNORE INTO smtp_config (id) VALUES (1)")
@@ -275,13 +274,12 @@ def guardar_smtp_config(remitente, app_password, destinatarios_texto,
     app_password_ok = validar_app_password(app_password)
     destinatarios = validar_destinatarios(destinatarios_texto)
 
-    cifrada = crypto_utils.encrypt(app_password_ok)
     with get_conn() as conn:
         conn.execute(
             "UPDATE smtp_config SET habilitado=?, smtp_host=?, smtp_port=?, "
             "remitente=?, app_password_cifrada=?, destinatarios=?, "
             "actualizado_por=?, actualizado_en=? WHERE id=1",
-            (int(habilitado), smtp_host, int(smtp_port), remitente, cifrada,
+            (int(habilitado), smtp_host, int(smtp_port), remitente, app_password_ok,
              ",".join(destinatarios), actualizado_por,
              datetime.now().isoformat(timespec="seconds")),
         )
@@ -303,7 +301,7 @@ def get_smtp_config(incluir_password=False):
     data["destinatarios"] = [d for d in data["destinatarios"].split(",") if d]
     data["habilitado"] = bool(data["habilitado"])
     if incluir_password:
-        data["app_password"] = crypto_utils.decrypt(data["app_password_cifrada"])
+        data["app_password"] = data["app_password_cifrada"]
     data.pop("app_password_cifrada", None)
     return data
 

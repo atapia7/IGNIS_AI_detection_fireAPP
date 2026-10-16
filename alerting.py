@@ -21,6 +21,24 @@ import database as db
 logger = logging.getLogger("ignisai")
 
 
+def _enviar_smtp(cfg: dict, msg) -> None:
+    """
+    Intenta enviar el mensaje con STARTTLS (puerto configurado, por defecto 587).
+    Si falla, reintenta con SMTP_SSL en puerto 465, que algunos proveedores
+    cloud bloquean menos que STARTTLS.
+    """
+    try:
+        with smtplib.SMTP(cfg["host"], cfg["port"], timeout=15) as s:
+            s.starttls()
+            s.login(cfg["user"], cfg["password"])
+            s.send_message(msg)
+    except Exception as e_starttls:
+        logger.warning("STARTTLS falló (%s), reintentando con SSL/465…", e_starttls)
+        with smtplib.SMTP_SSL(cfg["host"], 465, timeout=15) as s:
+            s.login(cfg["user"], cfg["password"])
+            s.send_message(msg)
+
+
 def _config_activa():
     """
     Resuelve la configuración SMTP vigente: prioriza la guardada desde la
@@ -118,10 +136,7 @@ class AlertManager:
             with open(imagen_path, "rb") as f:
                 img = MIMEImage(f.read(), name=os.path.basename(imagen_path))
                 msg.attach(img)
-            with smtplib.SMTP(cfg["host"], cfg["port"], timeout=15) as server:
-                server.starttls()
-                server.login(cfg["user"], cfg["password"])
-                server.send_message(msg)
+            _enviar_smtp(cfg, msg)
             logger.info("Correo de alerta enviado a %s (config: %s)", msg["To"], cfg["origen"])
             return True
         except Exception as exc:
@@ -154,10 +169,7 @@ class AlertManager:
             "plain", "utf-8",
         ))
         try:
-            with smtplib.SMTP(cfg["host"], cfg["port"], timeout=15) as server:
-                server.starttls()
-                server.login(cfg["user"], cfg["password"])
-                server.send_message(msg)
+            _enviar_smtp(cfg, msg)
             logger.info("Correo de prueba enviado a %s", msg["To"])
             return True, f"Correo de prueba enviado correctamente a {msg['To']}."
         except smtplib.SMTPAuthenticationError:
