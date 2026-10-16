@@ -13,9 +13,7 @@ COPY . .
 
 RUN mkdir -p logs assets
 
-EXPOSE 8502
-
 CMD streamlit run app.py \
-    --server.port=${PORT:-8502} \
+    --server.port=$PORT \
     --server.address=0.0.0.0 \
     --server.headless=true
