@@ -14,6 +14,7 @@ import time
 
 import av
 import cv2
+import requests
 import streamlit as st
 from streamlit_webrtc import VideoProcessorBase, RTCConfiguration, webrtc_streamer
 
@@ -22,12 +23,47 @@ import database as db
 from alerting import AlertManager
 from detector import FireDetector
 
-# STUN público de Google — permite la negociación WebRTC en la mayoría de redes.
-# Si la red del usuario está detrás de un NAT simétrico estricto puede que
-# requiera un servidor TURN adicional.
-_RTC_CONFIG = RTCConfiguration({
-    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-})
+
+def _build_rtc_config() -> RTCConfiguration:
+    """
+    Construye la configuración ICE con TURN para que WebRTC funcione
+    detrás del NAT de Railway. Prioriza credenciales Metered si están
+    disponibles vía METERED_API_KEY; de lo contrario usa Open Relay
+    (servidores TURN públicos gratuitos de Metered).
+    """
+    api_key = os.environ.get("METERED_API_KEY", "").strip()
+    if api_key:
+        try:
+            resp = requests.get(
+                f"https://ignisai.metered.live/api/v1/turn/credentials?apiKey={api_key}",
+                timeout=5,
+            )
+            if resp.ok:
+                return RTCConfiguration({"iceServers": resp.json()})
+        except Exception:
+            pass
+
+    # Open Relay — servidores TURN públicos gratuitos mantenidos por Metered.ca
+    return RTCConfiguration({
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {
+                "urls": [
+                    "turn:openrelay.metered.ca:80",
+                    "turn:openrelay.metered.ca:443",
+                    "turn:openrelay.metered.ca:443?transport=tcp",
+                    "turn:openrelay.metered.ca:80?transport=tcp",
+                ],
+                "username": "openrelayproject",
+                "credential": "openrelayproject",
+            },
+        ]
+    })
+
+
+@st.cache_resource
+def _rtc_config() -> RTCConfiguration:
+    return _build_rtc_config()
 
 
 @st.cache_resource
@@ -149,7 +185,7 @@ def render():
             ctx = webrtc_streamer(
                 key="ignisai-fire-detection",
                 video_processor_factory=FireVideoProcessor,
-                rtc_configuration=_RTC_CONFIG,
+                rtc_configuration=_rtc_config(),
                 media_stream_constraints={"video": True, "audio": False},
                 async_processing=True,
             )
