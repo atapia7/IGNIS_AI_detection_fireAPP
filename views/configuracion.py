@@ -114,6 +114,15 @@ def render():
             "[myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)."
         )
 
+    # Revelar credencial guardada actualmente
+    if smtp_cfg and smtp_cfg.get("remitente"):
+        if st.checkbox("👁 Mostrar credencial guardada actualmente"):
+            actual = db.get_smtp_config(incluir_password=True)
+            cred_actual = actual.get("app_password", "") if actual else ""
+            label = "Resend API Key actual" if smtp_cfg["smtp_host"] == "resend" else "Contraseña Gmail actual"
+            st.code(cred_actual or "(vacía)", language=None)
+            st.caption(f"Proveedor guardado: **{'Resend' if smtp_cfg['smtp_host'] == 'resend' else 'Gmail SMTP'}** · {label}")
+
     with st.form("form_smtp"):
         c1, c2 = st.columns(2)
         with c1:
@@ -134,7 +143,7 @@ def render():
                 "Resend API Key",
                 type="password",
                 placeholder="re_xxxxxxxxxxxxxxxxxxxxxxxxxx",
-                help="Déjalo en blanco para conservar la clave ya guardada.",
+                help="Déjalo en blanco para conservar la credencial guardada actualmente.",
             )
             smtp_host = "resend"
             smtp_port = 0
@@ -143,7 +152,7 @@ def render():
                 "Contraseña de Aplicación de Google (16 caracteres)",
                 type="password",
                 placeholder="xxxx xxxx xxxx xxxx",
-                help="Déjala en blanco para conservar la ya guardada.",
+                help="Déjala en blanco para conservar la credencial guardada actualmente.",
             )
             with st.expander("Opciones avanzadas del servidor SMTP"):
                 a1, a2 = st.columns(2)
@@ -180,13 +189,15 @@ def render():
         try:
             if credencial.strip():
                 password_a_guardar = credencial.strip()
-            elif smtp_cfg and smtp_cfg["remitente"]:
-                actual = db.get_smtp_config(incluir_password=True)
-                password_a_guardar = actual["app_password"]
-                if not password_a_guardar:
-                    raise ValueError("No hay credencial guardada. Ingrésala nuevamente.")
             else:
-                raise ValueError("Debes ingresar la credencial la primera vez que configuras el correo.")
+                # Conservar la credencial guardada en la DB (init_db siembra Resend por defecto)
+                actual = db.get_smtp_config(incluir_password=True)
+                password_a_guardar = (actual or {}).get("app_password", "")
+                if not password_a_guardar:
+                    raise ValueError(
+                        "No hay credencial guardada. Ingresa la "
+                        + ("Resend API Key." if usar_resend else "Contraseña de Aplicación de Google.")
+                    )
 
             db.guardar_smtp_config(
                 remitente=remitente,
