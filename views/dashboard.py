@@ -32,10 +32,11 @@ def _build_rtc_config() -> RTCConfiguration:
     (servidores TURN públicos gratuitos de Metered).
     """
     api_key = os.environ.get("METERED_API_KEY", "").strip()
-    if api_key:
+    domain  = os.environ.get("METERED_DOMAIN", "").strip()
+    if api_key and domain:
         try:
             resp = requests.get(
-                f"https://ignisai.metered.live/api/v1/turn/credentials?apiKey={api_key}",
+                f"https://{domain}/api/v1/turn/credentials?apiKey={api_key}",
                 timeout=5,
             )
             if resp.ok:
