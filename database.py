@@ -271,7 +271,12 @@ def guardar_smtp_config(remitente, app_password, destinatarios_texto,
     remitente = remitente.strip().lower()
     if not _CORREO_RE.match(remitente):
         raise ValueError("El correo remitente no tiene un formato válido.")
-    app_password_ok = validar_app_password(app_password)
+    if smtp_host == "resend":
+        app_password_ok = app_password.strip()
+        if not app_password_ok:
+            raise ValueError("Debes ingresar la Resend API Key.")
+    else:
+        app_password_ok = validar_app_password(app_password)
     destinatarios = validar_destinatarios(destinatarios_texto)
 
     with get_conn() as conn:
