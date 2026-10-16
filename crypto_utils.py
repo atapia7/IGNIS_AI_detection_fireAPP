@@ -12,9 +12,13 @@ from cryptography.fernet import Fernet, InvalidToken
 import config
 
 _KEY_PATH = os.path.join(config.BASE_DIR, ".secret.key")
+_KEY_ENV = "IGNISAI_SECRET_KEY"
 
 
 def _load_or_create_key() -> bytes:
+    env_key = os.environ.get(_KEY_ENV, "").strip()
+    if env_key:
+        return env_key.encode()
     if os.path.exists(_KEY_PATH):
         with open(_KEY_PATH, "rb") as f:
             return f.read().strip()

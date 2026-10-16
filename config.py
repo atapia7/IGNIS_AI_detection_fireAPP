@@ -7,7 +7,7 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # --- Base de datos (SQLite - Capa de Almacenamiento y Lógica) ---
-DB_PATH = os.path.join(BASE_DIR, "ignisai.db")
+DB_PATH = os.environ.get("IGNISAI_DB_PATH", os.path.join(BASE_DIR, "ignisai.db"))
 
 # --- Modelo de IA (HU01 / HU05) ---
 MODELS_DIR = os.path.join(BASE_DIR, "models")
