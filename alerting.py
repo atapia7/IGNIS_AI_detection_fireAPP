@@ -2,7 +2,8 @@
 IgnisAI - Alertas automáticas vía correo electrónico (HU06 - Sprint 2)
 - Se dispara cuando la detección se mantiene constante > 5 segundos.
 - Asunto estandarizado: "ALERTA IGNISAI: Posible incendio detectado".
-- Cuerpo con el fotograma capturado (recuadro dibujado), fecha y hora.
+- Soporta dos proveedores: Resend (API HTTP, recomendado en cloud) y
+  Gmail SMTP (para uso local).
 """
 import os
 import time
@@ -21,12 +22,32 @@ import database as db
 logger = logging.getLogger("ignisai")
 
 
+# ---------------------------------------------------------------
+# Envío vía Resend (HTTP API — funciona en cualquier cloud)
+# ---------------------------------------------------------------
+def _enviar_resend(cfg: dict, subject: str, body: str, imagen_path: str = None) -> None:
+    import resend as _resend
+    _resend.api_key = cfg["password"]
+    params = {
+        "from": cfg["user"],
+        "to": cfg["destinatarios"],
+        "subject": subject,
+        "text": body,
+    }
+    if imagen_path and os.path.exists(imagen_path):
+        with open(imagen_path, "rb") as f:
+            contenido = list(f.read())
+        params["attachments"] = [{
+            "filename": os.path.basename(imagen_path),
+            "content": contenido,
+        }]
+    _resend.Emails.send(params)
+
+
+# ---------------------------------------------------------------
+# Envío vía SMTP (Gmail u otro servidor)
+# ---------------------------------------------------------------
 def _enviar_smtp(cfg: dict, msg) -> None:
-    """
-    Intenta enviar el mensaje con STARTTLS (puerto configurado, por defecto 587).
-    Si falla, reintenta con SMTP_SSL en puerto 465, que algunos proveedores
-    cloud bloquean menos que STARTTLS.
-    """
     try:
         with smtplib.SMTP(cfg["host"], cfg["port"], timeout=15) as s:
             s.starttls()
@@ -41,15 +62,14 @@ def _enviar_smtp(cfg: dict, msg) -> None:
 
 def _config_activa():
     """
-    Resuelve la configuración SMTP vigente: prioriza la guardada desde la
-    web (HU06, cifrada en la base de datos); si no está habilitada, recae
-    en las variables de entorno definidas al arrancar la aplicación.
-    Devuelve None si no hay ninguna configuración utilizable.
+    Resuelve la configuración de correo vigente.
+    Prioriza la guardada desde la web; si no está habilitada recae en
+    las variables de entorno. Devuelve None si no hay configuración.
     """
     guardada = db.get_smtp_config(incluir_password=True)
     if guardada and guardada["habilitado"] and guardada["remitente"] and guardada["app_password"]:
         return {
-            "host": guardada["smtp_host"],
+            "host": guardada["smtp_host"],      # 'resend' o 'smtp.gmail.com'
             "port": guardada["smtp_port"],
             "user": guardada["remitente"],
             "password": guardada["app_password"],
@@ -68,28 +88,38 @@ def _config_activa():
     return None
 
 
+def _despachar(cfg: dict, subject: str, body: str, imagen_path: str = None) -> None:
+    """Despacha el correo al proveedor correcto según cfg['host']."""
+    if cfg["host"] == "resend":
+        _enviar_resend(cfg, subject, body, imagen_path)
+    else:
+        msg = MIMEMultipart()
+        msg["Subject"] = subject
+        msg["From"] = cfg["user"]
+        msg["To"] = ", ".join(cfg["destinatarios"])
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        if imagen_path and os.path.exists(imagen_path):
+            with open(imagen_path, "rb") as f:
+                img = MIMEImage(f.read(), name=os.path.basename(imagen_path))
+                msg.attach(img)
+        _enviar_smtp(cfg, msg)
+
+
 class AlertManager:
     """Controla la lógica de detección sostenida y el envío de correos."""
 
     def __init__(self):
-        self.detection_started_at = None   # inicio de la racha de detección
-        self.last_email_at = 0.0           # anti-spam (cooldown)
+        self.detection_started_at = None
+        self.last_email_at = 0.0
 
     def update(self, has_detection: bool) -> bool:
-        """
-        Actualiza la máquina de estados de detección sostenida.
-        Devuelve True si corresponde disparar una alerta (>= 5 s sostenidos
-        y fuera del periodo de enfriamiento).
-        """
         now = time.time()
         if not has_detection:
             self.detection_started_at = None
             return False
-
         if self.detection_started_at is None:
             self.detection_started_at = now
             return False
-
         sostenida = now - self.detection_started_at >= config.ALERT_SUSTAIN_SECONDS
         fuera_cooldown = now - self.last_email_at >= config.ALERT_COOLDOWN_SECONDS
         if sostenida and fuera_cooldown:
@@ -98,10 +128,8 @@ class AlertManager:
             return True
         return False
 
-    # ------------------------------------------------------------------
     @staticmethod
     def guardar_fotograma(frame) -> str:
-        """Guarda el fotograma anotado como evidencia visual de la alerta."""
         os.makedirs(os.path.join(config.BASE_DIR, "assets"), exist_ok=True)
         nombre = datetime.now().strftime("alerta_%Y%m%d_%H%M%S.jpg")
         ruta = os.path.join(config.BASE_DIR, "assets", nombre)
@@ -110,19 +138,12 @@ class AlertManager:
 
     @staticmethod
     def enviar_correo(imagen_path: str, clase: str, confianza: float) -> bool:
-        """Envía la notificación SMTP con la evidencia adjunta (HU06)."""
         cfg = _config_activa()
         if cfg is None:
-            logger.warning("SMTP no configurado: alerta registrada sin envío de correo.")
+            logger.warning("Correo no configurado: alerta registrada sin envío.")
             return False
-
         ahora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        msg = MIMEMultipart()
-        msg["Subject"] = config.EMAIL_SUBJECT
-        msg["From"] = cfg["user"]
-        msg["To"] = ", ".join(cfg["destinatarios"])
-
-        cuerpo = (
+        body = (
             f"Se ha detectado una posible amenaza de tipo '{clase.upper()}' "
             f"con una confianza del {confianza * 100:.1f}%.\n\n"
             f"Fecha y hora de la detección: {ahora}\n\n"
@@ -130,14 +151,10 @@ class AlertManager:
             "recuadro de detección dibujado.\n\n"
             "-- Sistema de Detección Temprana de Incendios Forestales IgnisAI"
         )
-        msg.attach(MIMEText(cuerpo, "plain", "utf-8"))
-
         try:
-            with open(imagen_path, "rb") as f:
-                img = MIMEImage(f.read(), name=os.path.basename(imagen_path))
-                msg.attach(img)
-            _enviar_smtp(cfg, msg)
-            logger.info("Correo de alerta enviado a %s (config: %s)", msg["To"], cfg["origen"])
+            _despachar(cfg, config.EMAIL_SUBJECT, body, imagen_path)
+            logger.info("Correo de alerta enviado a %s (config: %s)",
+                        ", ".join(cfg["destinatarios"]), cfg["origen"])
             return True
         except Exception as exc:
             logger.error("Fallo en el envío del correo de alerta: %s", exc)
@@ -145,37 +162,21 @@ class AlertManager:
 
     @staticmethod
     def enviar_correo_prueba():
-        """
-        Envía un correo de prueba con la configuración recién guardada desde
-        la interfaz (HU06). Devuelve (ok: bool, mensaje: str) para mostrar
-        el resultado exacto en la vista de Configuración.
-        """
         cfg = _config_activa()
         if cfg is None:
-            return False, ("No hay una configuración SMTP habilitada. Guarde primero el "
-                           "correo remitente, la Contraseña de Aplicación y los destinatarios.")
-
+            return False, ("No hay configuración de correo habilitada. "
+                           "Configure el proveedor y guarde primero.")
         ahora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        msg = MIMEMultipart()
-        msg["Subject"] = "IgnisAI: correo de prueba de configuración"
-        msg["From"] = cfg["user"]
-        msg["To"] = ", ".join(cfg["destinatarios"])
-        msg.attach(MIMEText(
+        body = (
             "Este es un correo de prueba generado desde el módulo de Configuración "
             "de IgnisAI para verificar el envío de alertas (HU06).\n\n"
             f"Fecha y hora de la prueba: {ahora}\n\n"
-            "Si ha recibido este mensaje, la configuración SMTP es correcta y el "
-            "sistema podrá notificar automáticamente las detecciones sostenidas.",
-            "plain", "utf-8",
-        ))
+            "Si ha recibido este mensaje, la configuración es correcta y el "
+            "sistema podrá notificar automáticamente las detecciones sostenidas."
+        )
         try:
-            _enviar_smtp(cfg, msg)
-            logger.info("Correo de prueba enviado a %s", msg["To"])
-            return True, f"Correo de prueba enviado correctamente a {msg['To']}."
-        except smtplib.SMTPAuthenticationError:
-            return False, ("Autenticación rechazada por el servidor SMTP. Verifique que el "
-                           "correo remitente y la Contraseña de Aplicación (16 caracteres) "
-                           "sean correctos y que la verificación en dos pasos esté activa "
-                           "en la cuenta de Google.")
+            _despachar(cfg, "IgnisAI: correo de prueba de configuración", body)
+            logger.info("Correo de prueba enviado a %s", ", ".join(cfg["destinatarios"]))
+            return True, f"Correo de prueba enviado correctamente a {', '.join(cfg['destinatarios'])}."
         except Exception as exc:
             return False, f"No se pudo enviar el correo de prueba: {exc}"

@@ -74,76 +74,100 @@ def render():
 
     st.divider()
     st.subheader("✉️ Correo de alertas (HU06 — opcional)")
-    st.caption(
-        "Configure el envío automático de alertas por correo cuando una detección "
-        "se mantenga sostenida por más de "
-        f"{config.ALERT_SUSTAIN_SECONDS} s. Requiere una **Contraseña de Aplicación "
-        "de Google de 16 caracteres** (no la contraseña normal de la cuenta)."
-    )
 
     smtp_cfg = db.get_smtp_config()
-    estado_col, ayuda_col = st.columns([3, 2])
-    with estado_col:
-        if smtp_cfg and smtp_cfg["habilitado"] and smtp_cfg["remitente"]:
-            st.success(
-                f"✅ Alertas habilitadas · Remitente: **{smtp_cfg['remitente']}** → "
-                f"{', '.join(smtp_cfg['destinatarios'])}"
-            )
-            st.caption(f"Última actualización: {smtp_cfg['actualizado_por']} · "
-                       f"{smtp_cfg['actualizado_en']}")
-        elif smtp_cfg and smtp_cfg["remitente"]:
-            st.warning("⏸️ Configuración guardada pero **deshabilitada**. Las alertas "
-                       "se seguirán registrando en el sistema sin enviar correo.")
-        else:
-            st.info("Sin configurar. Las alertas se registran igualmente en la base "
-                    "de datos; solo no se enviará el correo hasta configurarlo aquí.")
-    with ayuda_col:
-        st.link_button(
-            "🔑 Generar Contraseña de Aplicación",
-            "https://myaccount.google.com/apppasswords",
-            use_container_width=True,
+
+    # Estado actual
+    if smtp_cfg and smtp_cfg["habilitado"] and smtp_cfg["remitente"]:
+        proveedor_actual = "resend" if smtp_cfg["smtp_host"] == "resend" else "gmail"
+        st.success(
+            f"✅ Alertas habilitadas · {'Resend' if proveedor_actual == 'resend' else 'Gmail'} · "
+            f"**{smtp_cfg['remitente']}** → {', '.join(smtp_cfg['destinatarios'])}"
+        )
+        st.caption(f"Última actualización: {smtp_cfg['actualizado_por']} · {smtp_cfg['actualizado_en']}")
+    elif smtp_cfg and smtp_cfg["remitente"]:
+        st.warning("⏸️ Configuración guardada pero **deshabilitada**.")
+    else:
+        st.info("Sin configurar. Las alertas se registran en la base de datos pero no se envía correo.")
+
+    # Selector de proveedor (fuera del form para refrescar campos dinámicamente)
+    proveedor_guardado = "Resend (nube)" if (smtp_cfg and smtp_cfg["smtp_host"] == "resend") else "Gmail SMTP (local)"
+    proveedor = st.radio(
+        "Proveedor de correo",
+        ["Resend (nube)", "Gmail SMTP (local)"],
+        index=0 if proveedor_guardado == "Resend (nube)" else 1,
+        horizontal=True,
+        help="Resend usa HTTPS — funciona en Railway y cualquier cloud. Gmail SMTP funciona en local.",
+    )
+    usar_resend = proveedor == "Resend (nube)"
+
+    if usar_resend:
+        st.caption(
+            "Resend es un servicio de email por API (no SMTP). "
+            "Crea tu cuenta gratis en [resend.com](https://resend.com) → API Keys → Create API Key. "
+            "El correo remitente debe estar verificado en tu cuenta Resend."
+        )
+    else:
+        st.caption(
+            "Gmail SMTP requiere una **Contraseña de Aplicación de 16 caracteres** "
+            "(no la contraseña normal). Generarla en "
+            "[myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)."
         )
 
     with st.form("form_smtp"):
         c1, c2 = st.columns(2)
         with c1:
             remitente = st.text_input(
-                "Correo remitente (Gmail)",
+                "Correo remitente",
                 value=(smtp_cfg["remitente"] if smtp_cfg else ""),
-                placeholder="alertas.ignisai@gmail.com",
+                placeholder="alertas@tudominio.com" if usar_resend else "alertas.ignisai@gmail.com",
             )
         with c2:
             destinatarios = st.text_input(
-                "Destinatarios de la alerta (separados por coma)",
+                "Destinatarios (separados por coma)",
                 value=(", ".join(smtp_cfg["destinatarios"]) if smtp_cfg else ""),
-                placeholder="guardaparques@cusco.gob.pe, brigada@cusco.gob.pe",
+                placeholder="guardaparques@cusco.gob.pe",
             )
 
-        app_password = st.text_input(
-            "Contraseña de Aplicación de Google (16 caracteres)",
-            type="password",
-            placeholder="xxxx xxxx xxxx xxxx",
-            help="Se cifra antes de guardarse; nunca se muestra en texto plano. "
-                 "Déjela en blanco para conservar la ya guardada.",
-        )
+        if usar_resend:
+            credencial = st.text_input(
+                "Resend API Key",
+                type="password",
+                placeholder="re_xxxxxxxxxxxxxxxxxxxxxxxxxx",
+                help="Déjalo en blanco para conservar la clave ya guardada.",
+            )
+            smtp_host = "resend"
+            smtp_port = 0
+        else:
+            credencial = st.text_input(
+                "Contraseña de Aplicación de Google (16 caracteres)",
+                type="password",
+                placeholder="xxxx xxxx xxxx xxxx",
+                help="Déjala en blanco para conservar la ya guardada.",
+            )
+            with st.expander("Opciones avanzadas del servidor SMTP"):
+                a1, a2 = st.columns(2)
+                with a1:
+                    smtp_host = st.text_input(
+                        "Servidor SMTP",
+                        value=(smtp_cfg["smtp_host"] if smtp_cfg and smtp_cfg["smtp_host"] != "resend"
+                               else "smtp.gmail.com"),
+                    )
+                with a2:
+                    smtp_port = st.number_input(
+                        "Puerto",
+                        value=int(smtp_cfg["smtp_port"] if smtp_cfg and smtp_cfg["smtp_host"] != "resend"
+                                  else 587),
+                        min_value=1, max_value=65535, step=1,
+                    )
+
         if smtp_cfg and smtp_cfg["remitente"]:
-            st.caption("🔒 Ya existe una Contraseña de Aplicación guardada para este "
-                       "remitente. Complete este campo solo si desea reemplazarla.")
+            st.caption("🔒 Credencial ya guardada. Completa el campo solo si quieres reemplazarla.")
 
         habilitado = st.checkbox(
             "Habilitar el envío automático de alertas por correo",
             value=bool(smtp_cfg and smtp_cfg["habilitado"]),
         )
-
-        with st.expander("Opciones avanzadas del servidor SMTP"):
-            a1, a2 = st.columns(2)
-            with a1:
-                smtp_host = st.text_input(
-                    "Servidor SMTP", value=(smtp_cfg["smtp_host"] if smtp_cfg else "smtp.gmail.com"))
-            with a2:
-                smtp_port = st.number_input(
-                    "Puerto", value=int(smtp_cfg["smtp_port"] if smtp_cfg else 587),
-                    min_value=1, max_value=65535, step=1)
 
         bc1, bc2 = st.columns(2)
         with bc1:
@@ -154,20 +178,15 @@ def render():
 
     if guardar or guardar_y_probar:
         try:
-            if app_password.strip():
-                password_a_guardar = app_password
+            if credencial.strip():
+                password_a_guardar = credencial.strip()
             elif smtp_cfg and smtp_cfg["remitente"]:
-                # No se ingresó una nueva: conservar la ya guardada para este remitente.
                 actual = db.get_smtp_config(incluir_password=True)
                 password_a_guardar = actual["app_password"]
                 if not password_a_guardar:
-                    raise ValueError(
-                        "No se encontró una Contraseña de Aplicación previa válida. "
-                        "Ingrésela nuevamente (16 caracteres).")
+                    raise ValueError("No hay credencial guardada. Ingrésala nuevamente.")
             else:
-                raise ValueError(
-                    "Debe ingresar la Contraseña de Aplicación de Google (16 caracteres) "
-                    "la primera vez que configure el correo de alertas.")
+                raise ValueError("Debes ingresar la credencial la primera vez que configuras el correo.")
 
             db.guardar_smtp_config(
                 remitente=remitente,
