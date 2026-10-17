@@ -154,12 +154,19 @@ def _procesar_frame(frame, detector, alert_mgr):
 
 def render():
     st.title("📹 Dashboard Centralizado de Monitoreo")
+    # Si el cache tiene una instancia de una versión anterior de FireDetector
+    # (sin el atributo supports_smoke), lo limpiamos para recrearla.
+    if not hasattr(get_detector(), "supports_smoke"):
+        get_detector.clear()
     detector = get_detector()
 
     if detector.simulated:
         st.warning("Motor en **modo simulación** (sin pesos YOLOv8 entrenados). "
                    "Cargue `models/best.pt` o súbalo desde Configuración para "
                    "activar la inferencia con CNN.")
+    elif not getattr(detector, "supports_smoke", False):
+        st.info("ℹ️ El modelo cargado detecta **solo fuego** (clase 'fire'). "
+                "Para detección de humo se requiere un modelo entrenado con esa clase.")
 
     col_video, col_alertas = st.columns([3, 1.4])
 

@@ -15,8 +15,10 @@ DEFAULT_MODEL_PATH = os.path.join(MODELS_DIR, "best.pt")   # pesos entrenados YO
 MAX_MODEL_SIZE_MB = 150                                     # HU05: tamaño máximo 150 MB
 VALID_MODEL_EXTENSIONS = (".pt", ".onnx")                   # HU05: extensiones válidas YOLO
 
-# Clases objetivo del modelo (humo / fuego)
-TARGET_CLASSES = {0: "fuego", 1: "humo"}
+# Clases objetivo del modelo — usadas como fallback de índice en detector.py.
+# NOTA: los modelos incluidos (best.pt / fire_8n.pt) solo tienen clase 0 = "fire".
+# Si se carga un modelo con 2 clases (fuego + humo), agregar {0: "fire", 1: "smoke"}.
+TARGET_CLASSES = {0: "fire", 1: "smoke"}
 
 # --- Video / Detección (HU02 / HU03) ---
 CAMERA_INDEX = 0            # cámara USB

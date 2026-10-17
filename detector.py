@@ -7,7 +7,6 @@ demostración funcional del MVP (interfaz, alertas, historial, reportes).
 import os
 import time
 import logging
-import random
 
 import cv2
 import numpy as np
@@ -22,6 +21,15 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 logger = logging.getLogger("ignisai")
+
+# Mapa canónico: cualquier nombre del modelo → clase interna
+_NAME_MAP = {
+    "fire":  "fuego",
+    "fuego": "fuego",
+    "flame": "fuego",
+    "smoke": "humo",
+    "humo":  "humo",
+}
 
 
 class Detection:
@@ -50,14 +58,28 @@ class FireDetector:
 
     def _load(self):
         try:
-            from ultralytics import YOLO  # import diferido: dependencia pesada
+            from ultralytics import YOLO
             if os.path.exists(self.model_path):
                 t0 = time.time()
                 self.model = YOLO(self.model_path)
+                class_names = list(self.model.names.values())
                 logger.info(
-                    "Arranque exitoso del modelo YOLOv8 '%s' en %.2f s",
-                    os.path.basename(self.model_path), time.time() - t0,
+                    "Arranque exitoso del modelo YOLOv8 '%s' en %.2f s. Clases: %s",
+                    os.path.basename(self.model_path), time.time() - t0, class_names,
                 )
+                found = {n.lower() for n in class_names}
+                if not ({"fire", "fuego", "flame"} & found):
+                    logger.warning(
+                        "El modelo no contiene clases de fuego reconocidas. "
+                        "Clases encontradas: %s. Revise el archivo de pesos.",
+                        class_names,
+                    )
+                if not ({"smoke", "humo"} & found):
+                    logger.warning(
+                        "El modelo no contiene clase de humo (%s). "
+                        "La detección de humo no estará disponible.",
+                        class_names,
+                    )
                 return
             logger.warning("Pesos no encontrados en %s. Se activa modo simulación.",
                            self.model_path)
@@ -67,6 +89,13 @@ class FireDetector:
             logger.error("Error al cargar el modelo: %s. Modo simulación.", exc)
         self.simulated = True
         logger.info("Arranque del motor de detección en MODO SIMULACIÓN.")
+
+    @property
+    def supports_smoke(self) -> bool:
+        """True si el modelo actual puede detectar humo."""
+        if self.simulated:
+            return True
+        return any(n.lower() in ("smoke", "humo") for n in self.model.names.values())
 
     # ------------------------------------------------------------------
     def predict(self, frame) -> list:
@@ -82,11 +111,19 @@ class FireDetector:
             for box in r.boxes:
                 conf = float(box.conf[0])
                 cls_id = int(box.cls[0])
-                clase = str(names.get(cls_id, cls_id)).lower()
-                # Solo clases objetivo del dominio (humo / fuego)
-                if clase not in ("fuego", "humo", "fire", "smoke"):
+                raw = str(names.get(cls_id, "")).lower()
+
+                # 1) Mapeo por nombre (fuego / humo / fire / smoke / flame)
+                clase = _NAME_MAP.get(raw)
+
+                # 2) Fallback por índice usando TARGET_CLASSES de config
+                if clase is None:
+                    raw_fallback = config.TARGET_CLASSES.get(cls_id, "")
+                    clase = _NAME_MAP.get(raw_fallback.lower())
+
+                if clase is None:
                     continue
-                clase = {"fire": "fuego", "smoke": "humo"}.get(clase, clase)
+
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 detections.append(Detection(clase, conf, (x1, y1, x2, y2)))
         return detections
@@ -94,21 +131,38 @@ class FireDetector:
     def _simulate(self, frame):
         """
         Heurística HSV de respaldo: detecta regiones con colorimetría de
-        llama (rojo/naranja) para demostrar el pipeline sin pesos entrenados.
+        llama (rojo/naranja) y humo (gris de baja saturación).
+        Confianza determinista basada en proporción del área detectada.
         """
+        h, w = frame.shape[:2]
+        frame_area = h * w
+        min_area = max(500, frame_area * 0.002)  # mínimo 0.2 % del fotograma
+
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        m1 = cv2.inRange(hsv, (0, 120, 150), (12, 255, 255))
+
+        # Fuego: tono naranja/rojo (H ∈ [0,18] ∪ [170,180]), alta saturación y brillo
+        m1 = cv2.inRange(hsv, (0,   120, 150), (18,  255, 255))
         m2 = cv2.inRange(hsv, (170, 120, 150), (180, 255, 255))
-        mask = cv2.morphologyEx(m1 | m2, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        fire_mask = cv2.morphologyEx(m1 | m2, cv2.MORPH_OPEN,
+                                     np.ones((5, 5), np.uint8))
+
+        # Humo: gris de baja saturación con brillo medio
+        smoke_raw = cv2.inRange(hsv, (0, 0, 90), (180, 45, 210))
+        smoke_mask = cv2.morphologyEx(smoke_raw, cv2.MORPH_OPEN,
+                                      np.ones((7, 7), np.uint8))
 
         detections = []
-        for c in contours:
-            if cv2.contourArea(c) < 800:
-                continue
-            x, y, w, h = cv2.boundingRect(c)
-            conf = min(0.99, 0.55 + random.uniform(0, 0.3))
-            detections.append(Detection("fuego", conf, (x, y, x + w, y + h)))
+        for mask, clase in ((fire_mask, "fuego"), (smoke_mask, "humo")):
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                           cv2.CHAIN_APPROX_SIMPLE)
+            for c in contours:
+                area = cv2.contourArea(c)
+                if area < min_area:
+                    continue
+                x, y, cw, ch = cv2.boundingRect(c)
+                # Confianza determinista: área relativa → [0.50, 0.92]
+                conf = min(0.92, 0.50 + (area / frame_area) * 15)
+                detections.append(Detection(clase, conf, (x, y, x + cw, y + ch)))
         return detections
 
     # ------------------------------------------------------------------
